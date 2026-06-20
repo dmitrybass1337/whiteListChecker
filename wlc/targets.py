@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import bisect
 import ipaddress
 import sys
 import urllib.request
@@ -93,4 +94,79 @@ def gen_targets(prefixes_path: str, out_path: str,
                     seen.add(ip)
                     out.write(ip + "\n")
                     count += 1
+    return count
+
+
+def _load_found_24(whitelist_path: str) -> list[int]:
+    """Индексы /24 (network_address >> 8) из найденного whitelist'а."""
+    idx: set[int] = set()
+    with open(whitelist_path, encoding="utf-8-sig") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                net = ipaddress.ip_network(line, strict=False)
+            except ValueError:
+                continue
+            if net.version != 4:
+                continue
+            # сеть может быть крупнее /24 (после collapse) — разворачиваем в /24
+            lo = int(net.network_address) >> 8
+            hi = int(net.broadcast_address) >> 8
+            idx.update(range(lo, hi + 1))
+    return sorted(idx)
+
+
+def expand_targets(whitelist_path: str, prefixes_path: str, out_path: str,
+                   hosts: tuple[int, ...] = _DEFAULT_HOSTS,
+                   cap_prefixlen: int = 16) -> int:
+    """Фаза 2: вокруг подтверждённых /24 досканировать целиком анонсированные
+    сети, в которых они лежат. Анонс крупнее /cap_prefixlen разворачиваем не весь,
+    а блоками /cap_prefixlen вокруг каждого найденного /24 (чтобы не раздуло)."""
+    found = _load_found_24(whitelist_path)
+    if not found:
+        return 0
+    cap_block = 1 << (24 - cap_prefixlen)  # сколько /24 в /cap (cap=16 -> 256)
+    count = 0
+    seen: set[str] = set()
+    with open(prefixes_path, encoding="utf-8-sig") as fh, open(out_path, "w") as out:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            cidr = line.split()[0]
+            if ":" in cidr:
+                continue
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue
+            if net.version != 4:
+                continue
+            s24 = int(net.network_address) >> 8
+            e24 = int(net.broadcast_address) >> 8
+            i = bisect.bisect_left(found, s24)
+            if i >= len(found) or found[i] > e24:
+                continue  # в этой сети нет подтверждённых /24
+            # диапазоны /24-индексов для разворота
+            if net.prefixlen >= cap_prefixlen:
+                ranges = [(s24, e24)]
+            else:
+                ranges = []
+                j = i
+                while j < len(found) and found[j] <= e24:
+                    b = (found[j] // cap_block) * cap_block
+                    ranges.append((max(b, s24), min(b + cap_block - 1, e24)))
+                    j += 1
+            for bs, be in ranges:
+                for blk in range(bs, be + 1):
+                    base = blk << 8
+                    for h in hosts:
+                        if 1 <= h <= 254:
+                            ip = str(ipaddress.ip_address(base + h))
+                            if ip not in seen:
+                                seen.add(ip)
+                                out.write(ip + "\n")
+                                count += 1
     return count

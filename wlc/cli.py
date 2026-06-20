@@ -49,6 +49,17 @@ def _cmd_gen_targets(args) -> int:
     return 0
 
 
+def _cmd_expand(args) -> int:
+    hosts = tuple(int(h) for h in args.hosts.split(",") if h.strip())
+    n = targets_mod.expand_targets(args.whitelist, args.prefixes, args.out,
+                                   hosts=hosts, cap_prefixlen=args.cap)
+    print(f"[ok] {n} целей вокруг найденного ({len(hosts)} хост(ов)/24) -> {args.out}")
+    if n == 0:
+        sys.stderr.write("[warn] 0 целей — проверь, что whitelist непустой и "
+                         "prefixes покрывают найденные сети.\n")
+    return 0
+
+
 def _read_ips(path: str) -> list[str]:
     with open(path, encoding="utf-8-sig") as fh:
         return [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
@@ -176,6 +187,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="октеты для пробы в каждой /24 через запятую "
                          "(напр. 1,37,100,150,200,254). Больше = шире охват, но ×N трафика")
     sp.set_defaults(func=_cmd_gen_targets)
+
+    sp = sub.add_parser("expand", help="фаза 2: цели вокруг найденных /24")
+    sp.add_argument("--whitelist", default="data/whitelist.txt",
+                    help="результат aggregate (найденные /24)")
+    sp.add_argument("--prefixes", default="data/prefixes_ru.txt",
+                    help="анонсированные сети для разворота")
+    sp.add_argument("--out", default="data/targets_expand.txt")
+    sp.add_argument("--hosts", default="1,37,100,150,200,254")
+    sp.add_argument("--cap", type=int, default=16,
+                    help="анонс крупнее /N не разворачивать целиком, "
+                         "а только блоками /N вокруг хитов")
+    sp.set_defaults(func=_cmd_expand)
 
     sp = sub.add_parser("calibrate", help="снять отпечаток блокировки")
     sp.add_argument("--allowed", required=True)
