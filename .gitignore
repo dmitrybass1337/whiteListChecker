@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+data/prefixes.txt
+data/targets.txt
+data/results.jsonl
+data/classified.jsonl
+data/zmap_open.txt
+data/whitelist.txt
+data/fingerprint.json
+data/*.diff.json
