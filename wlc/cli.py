@@ -49,6 +49,64 @@ def _cmd_gen_targets(args) -> int:
     return 0
 
 
+def _cmd_check(args) -> int:
+    """Проверить доступность CIDR-списка с текущего канала: по каждому CIDR
+    пробуем несколько адресов, CIDR доступен, если ответил хоть один."""
+    from .probe import probe_ip
+    ports = [int(p) for p in args.ports.split(",")]
+    hosts = tuple(int(h) for h in args.hosts.split(",") if h.strip())
+    cidrs = agg_mod.load_cidrs(args.cidrs)
+    if not cidrs:
+        sys.stderr.write(f"[err] нет CIDR в {args.cidrs}\n")
+        return 1
+    cidrs.sort(key=agg_mod.int_key)
+    if args.pause:
+        _wait_for_network("проверка")
+
+    async def run() -> dict:
+        sem = asyncio.Semaphore(args.concurrency)
+        results: dict = {}
+
+        async def one(net) -> None:
+            cands = []
+            for ip in targets_mod._sample_prefix(net, hosts):
+                cands.append(ip)
+                if len(cands) >= args.max_probe:
+                    break
+            async with sem:
+                results[net] = None
+                for ip in cands:
+                    r = await probe_ip(ip, ports, args.timeout)
+                    op = [p.port for p in r.ports if p.state == "OPEN"]
+                    if op:
+                        results[net] = (ip, op)
+                        break
+        await asyncio.gather(*(one(n) for n in cidrs))
+        return results
+
+    results = asyncio.run(run())
+    up = 0
+    out_fh = open(args.out, "w", encoding="utf-8") if args.out else None
+    for net in cidrs:
+        hit = results.get(net)
+        if hit:
+            up += 1
+            ip, op = hit
+            print(f"[OPEN] {str(net):<18} via {ip}:{','.join(map(str, op))}")
+        else:
+            print(f"[DOWN] {str(net)}")
+        if out_fh:
+            out_fh.write(json.dumps(
+                {"cidr": str(net), "available": bool(hit),
+                 "via": hit[0] if hit else None,
+                 "ports": hit[1] if hit else None}, ensure_ascii=False) + "\n")
+    if out_fh:
+        out_fh.close()
+        print(f"[ok] отчёт -> {args.out}")
+    print(f"\n[итог] доступно {up}/{len(cidrs)} CIDR")
+    return 0
+
+
 def _cmd_expand(args) -> int:
     hosts = tuple(int(h) for h in args.hosts.split(",") if h.strip())
     n = targets_mod.expand_targets(args.whitelist, args.prefixes, args.out,
@@ -187,6 +245,21 @@ def build_parser() -> argparse.ArgumentParser:
                     help="октеты для пробы в каждой /24 через запятую "
                          "(напр. 1,37,100,150,200,254). Больше = шире охват, но ×N трафика")
     sp.set_defaults(func=_cmd_gen_targets)
+
+    sp = sub.add_parser("check", help="проверить доступность CIDR-списка с канала")
+    sp.add_argument("--cidrs", default="data/whitelist.txt",
+                    help="файл с CIDR (по одному на строку)")
+    sp.add_argument("--ports", default="80,443")
+    sp.add_argument("--hosts", default="1,37,100,150,200,254",
+                    help="октеты для пробы в каждой /24")
+    sp.add_argument("--max-probe", type=int, default=12,
+                    help="макс. адресов на CIDR до вердикта DOWN")
+    sp.add_argument("--concurrency", type=int, default=50)
+    sp.add_argument("--timeout", type=float, default=5.0)
+    sp.add_argument("--out", help="JSONL-отчёт (необязательно)")
+    sp.add_argument("--pause", action="store_true",
+                    help="ждать Enter перед стартом (переключиться на симку)")
+    sp.set_defaults(func=_cmd_check)
 
     sp = sub.add_parser("expand", help="фаза 2: цели вокруг найденных /24")
     sp.add_argument("--whitelist", default="data/whitelist.txt",
